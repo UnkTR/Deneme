@@ -13,12 +13,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download zapret (nfqws android-arm64)
+      - name: Download zapret2 (nfqws2 android-arm64 + lua)
         run: |
-          curl -fL --retry 3 -o zapret.tar.gz \
-            https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz
-          tar -xzf zapret.tar.gz
-          echo "cccf077972d9d8f378c04e8b97a12cfefeca3370d9ab558772b101c3736e250a  zapret-v72.13/binaries/android-arm64/nfqws" | sha256sum -c -
+          curl -fL --retry 3 -o zapret2.tar.gz \
+            https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz
+          tar -xzf zapret2.tar.gz
+          echo "7b084d0857c373173b4e7f782da93d8dc8c4e22c579fc7675370a2bc7f1d4218  zapret2-v1.0.5.2/binaries/android-arm64/nfqws2" | sha256sum -c -
 
       - name: Download dnsproxy (linux-arm64)
         run: |
@@ -30,17 +30,16 @@ jobs:
       - name: Assemble module
         run: |
           MOD=discord_dpi
-          mkdir -p $MOD/system/bin $MOD/fake
+          mkdir -p $MOD/system/bin $MOD/lua
           cp module/module.prop $MOD/
           cp module/service.sh $MOD/
           cp module/uninstall.sh $MOD/
-          cp zapret-v72.13/binaries/android-arm64/nfqws $MOD/system/bin/nfqws
+          cp zapret2-v1.0.5.2/binaries/android-arm64/nfqws2 $MOD/system/bin/nfqws2
           cp linux-arm64/dnsproxy $MOD/system/bin/dnsproxy
-          cp zapret-v72.13/files/fake/discord-ip-discovery-with-port.bin $MOD/fake/ || true
-          cp zapret-v72.13/files/fake/discord-ip-discovery-without-port.bin $MOD/fake/ || true
-          cp zapret-v72.13/files/fake/stun.bin $MOD/fake/ || true
-          chmod 755 $MOD/system/bin/nfqws $MOD/system/bin/dnsproxy $MOD/service.sh $MOD/uninstall.sh
-          ( cd $MOD && zip -r -X ../discord_dpi_vodafone.zip module.prop service.sh uninstall.sh system fake )
+          cp zapret2-v1.0.5.2/lua/*.lua $MOD/lua/
+          chmod 755 $MOD/system/bin/nfqws2 $MOD/system/bin/dnsproxy $MOD/service.sh $MOD/uninstall.sh
+          chmod 644 $MOD/lua/*.lua
+          ( cd $MOD && zip -r -X ../discord_dpi_vodafone.zip module.prop service.sh uninstall.sh system lua )
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
