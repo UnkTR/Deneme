@@ -27,6 +27,12 @@ jobs:
           echo "eda840d39da0c2777ea2431d3d73407e813e3fc0e411bfe256a9fb4b97d08247  dnsproxy.tar.gz" | sha256sum -c -
           tar -xzf dnsproxy.tar.gz
 
+      - name: Download CA bundle (Mozilla, curl.se) - dnsproxy DoH icin
+        run: |
+          curl -fL --retry 3 -o cacert.pem https://curl.se/ca/cacert.pem
+          test -s cacert.pem
+          grep -q "BEGIN CERTIFICATE" cacert.pem
+
       - name: Assemble module
         run: |
           MOD=discord_dpi
@@ -34,12 +40,13 @@ jobs:
           cp module/module.prop $MOD/
           cp module/service.sh $MOD/
           cp module/uninstall.sh $MOD/
+          cp cacert.pem $MOD/cacert.pem
           cp zapret2-v1.0.5.2/binaries/android-arm64/nfqws2 $MOD/system/bin/nfqws2
           cp linux-arm64/dnsproxy $MOD/system/bin/dnsproxy
           cp zapret2-v1.0.5.2/lua/*.lua $MOD/lua/
           chmod 755 $MOD/system/bin/nfqws2 $MOD/system/bin/dnsproxy $MOD/service.sh $MOD/uninstall.sh
-          chmod 644 $MOD/lua/*.lua
-          ( cd $MOD && zip -r -X ../discord_dpi_vodafone.zip module.prop service.sh uninstall.sh system lua )
+          chmod 644 $MOD/lua/*.lua $MOD/cacert.pem
+          ( cd $MOD && zip -r -X ../discord_dpi_vodafone.zip module.prop service.sh uninstall.sh cacert.pem system lua )
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
