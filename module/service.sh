@@ -1,18 +1,28 @@
 #!/system/bin/sh
 # ============================================================
-#  discord_dpi - Magisk service.sh (v7)
+#  discord_dpi - Magisk service.sh (v8)
 #  Motor  : zapret2 / nfqws2 (Android ARM64)
-#  Strateji (ISS'de test edilip CALISTI - Windows'ta):
+#  Strateji (ISS'de test edildi):
 #    --payload=tls_client_hello
 #    --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
-#  v7 DUZELTMESI:
-#    - nfqws2 --bind-fix4/--bind-fix6 ile calisir. Android PBR
-#      ortaminda uretilen paketlerin yanlis arayuzden cikmasi /
-#      kaybolmasi tum TCP'li siteleri olduruyordu. (Kok neden)
-#    - Baslangicta TCP ve DNS canli testleri yapilir; test
-#      gecmezse ilgili kurallar aninda geri alinir (fail-open).
-#    - Watchdog 30 sn'de surecleri, 5 dk'da testleri tekrar eder.
-#  IPv6 mudahalesi YOK. QUIC/UDP'ye dokunulmaz. nfqttl ELLENMEZ.
+#  DNS    : dnsproxy (DoH :5335)
+#  nfqttl ile UYUMLU: onun zincirlerine/kuyruguna dokunulmaz.
+#  IPv6 mudahalesi YOK. QUIC/UDP'ye dokunulmaz.
+#
+#  v8 DUZELTMELERI (v7 loglarindan tespit edildi):
+#  1) nfqws2, --uid ile yetki dusurunce Lua dosyalarini /data/adb
+#     altindan OKUYAMIYORDU ve hemen cikiyordu ("LUA file not
+#     accessible"). Lua dosyalari artik /data/local/tmp/discord_dpi_lua
+#     altina kopyalanip oradan yukleniyor.
+#  2) Bos pid dosyasi yuzunden surec "calisiyor" sanilabiliyordu.
+#     Artik pid_alive(): pid dolu + /proc girdisi var + cmdline'da
+#     isim geciyor kontrolu yapilir.
+#  3) DNS testi Google'a bagimli degildi; Google onbellekten
+#     cozulebildigi icin testi yanlis geciriyordu. Test artik
+#     example.com gibi Google OLMAYAN adlarla yapilir; basarisizsa
+#     DNS yonlendirme kurallari derhal geri alinir.
+#  4) dnsproxy upstream: 8.8.8.8, 1.0.0.1, 1.1.1.1, 9.9.9.9
+#     (parallel modda; biri blokluyse digeri cevap verir).
 # ============================================================
 
 PATH=/system/bin:/system/xbin:$PATH
@@ -20,6 +30,7 @@ PATH=/system/bin:/system/xbin:$PATH
 MODDIR=${0%/*}
 BINDIR="$MODDIR/system/bin"
 LUADIR="$MODDIR/lua"
+LUATMP=/data/local/tmp/discord_dpi_lua
 RUNDIR="$MODDIR/run"
 LOGDIR="$MODDIR/log"
 
@@ -47,12 +58,24 @@ have()
     command -v "$1" >/dev/null 2>&1
 }
 
+# pid dolu mu, /proc girdisi var mi, istege bagli isim eslesmesi
+pid_alive()
+{
+    _p="$1"
+    [ -n "$_p" ] || return 1
+    [ -d "/proc/$_p" ] || return 1
+    if [ -n "$2" ]; then
+        grep -q "$2" "/proc/$_p/cmdline" 2>/dev/null || return 1
+    fi
+    return 0
+}
+
 kill_if_ours()
 {
     _pid="$1"
     _name="$2"
     _file="$3"
-    if [ -n "$_pid" ] && [ -d "/proc/$_pid" ] && grep -q "$_name" "/proc/$_pid/cmdline" 2>/dev/null; then
+    if pid_alive "$_pid" "$_name"; then
         kill "$_pid" 2>/dev/null
     fi
     rm -f "$_file"
@@ -146,15 +169,18 @@ start_dns()
     [ -x "$DNSPROXY" ] || { log "HATA: dnsproxy bulunamadi"; return 1; }
     : > "$LOGDIR/dnsproxy.log"
 
+    # Upstream'ler IP-literal DoH: TR'de biri blokluysa digerleri
+    # cevap verir (parallel mod). Bootstrap kullanilmaz.
     "$DNSPROXY" -l 0.0.0.0 -p $DNS_PORT \
+        -u https://8.8.8.8/dns-query \
+        -u https://1.0.0.1/dns-query \
         -u https://1.1.1.1/dns-query \
         -u https://9.9.9.9/dns-query \
-        -f https://8.8.8.8/dns-query \
-        --cache --cache-size=4194304 --upstream-mode=parallel --timeout=5s \
+        --cache --cache-size=4194304 --upstream-mode=parallel --timeout=3s \
         >> "$LOGDIR/dnsproxy.log" 2>&1 &
     echo $! > "$RUNDIR/dnsproxy.pid"
     sleep 2
-    if kill -0 "$(cat "$RUNDIR/dnsproxy.pid")" 2>/dev/null; then
+    if pid_alive "$(cat "$RUNDIR/dnsproxy.pid" 2>/dev/null)" "dnsproxy"; then
         log "dnsproxy calisiyor (port $DNS_PORT)"
         return 0
     fi
@@ -166,32 +192,43 @@ start_dns()
 start_nfqws2()
 {
     [ -x "$NFQWS2" ] || { log "HATA: nfqws2 bulunamadi"; return 1; }
-    [ -f "$LUADIR/zapret-lib.lua" ] || { log "HATA: lua dosyalari eksik"; return 1; }
-    chmod 755 "$LUADIR" 2>/dev/null
-    chmod 644 "$LUADIR"/*.lua 2>/dev/null
+    [ -f "$LUADIR/zapret-lib.lua" ] || { log "HATA: modul lua dosyalari eksik"; return 1; }
+
+    # KRITIK: nfqws2 --uid ile yetki dusurunce /data/adb'yi okuyamaz
+    # (root-only). Lua dosyalarini UID 1'in erisebilecegi yere kopyala.
+    rm -rf "$LUATMP" 2>/dev/null
+    mkdir -p "$LUATMP" 2>/dev/null
+    cp -f "$LUADIR"/*.lua "$LUATMP"/ 2>/dev/null
+    if [ ! -f "$LUATMP/zapret-lib.lua" ] || [ ! -f "$LUATMP/zapret-antidpi.lua" ]; then
+        log "HATA: lua dosyalari $LUATMP altina kopyalanamadi"
+        return 1
+    fi
+    chmod 755 "$LUATMP" 2>/dev/null
+    chmod 644 "$LUATMP"/*.lua 2>/dev/null
+
     : > "$LOGDIR/nfqws2.log"
     chmod 666 "$LOGDIR/nfqws2.log" 2>/dev/null
     : > "$RUNDIR/nfqws2.pid"
     chmod 666 "$RUNDIR/nfqws2.pid" 2>/dev/null
 
-    # KRITIK: --bind-fix4/--bind-fix6
-    # Android PBR ortaminda uretilen paketlerin dogru arayuzden
-    # (rmnet_dataX) cikmasini saglar. Bu olmadan uretilen TLS
-    # parcalari kayboluyor ve TUM TCP siteler oldu.
     "$NFQWS2" --qnum=$QNUM --daemon --pidfile="$RUNDIR/nfqws2.pid" \
         --uid=1:3003 --bind-fix4 --bind-fix6 --fwmark=0x40000000 \
         --debug=@$LOGDIR/nfqws2.log \
-        --lua-init=@"$LUADIR/zapret-lib.lua" \
-        --lua-init=@"$LUADIR/zapret-antidpi.lua" \
+        --lua-init=@"$LUATMP/zapret-lib.lua" \
+        --lua-init=@"$LUATMP/zapret-antidpi.lua" \
         --payload=tls_client_hello \
         --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1 \
         >> "$LOGDIR/nfqws2.log" 2>&1
     sleep 2
-    if kill -0 "$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)" 2>/dev/null; then
-        log "nfqws2 calisiyor (qnum $QNUM, bind-fix4/6, tcpseg stratejisi)"
+    _pid="$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)"
+    if pid_alive "$_pid" "nfqws2"; then
+        log "nfqws2 calisiyor (qnum $QNUM, tcpseg, uid=1:3003, pid $_pid)"
         return 0
     fi
-    log "HATA: nfqws2 baslatilamadi ($LOGDIR/nfqws2.log)"
+    if grep -q "not accessible" "$LOGDIR/nfqws2.log" 2>/dev/null; then
+        log "HATA: nfqws2 lua dosyalarina erisemiyor (izin sorunu)"
+    fi
+    log "HATA: nfqws2 baslatilamadi (pid='$_pid', $LOGDIR/nfqws2.log)"
     return 1
 }
 
@@ -245,15 +282,16 @@ tcp_gate()
     return 1
 }
 
+# Google KULLANILMAZ: onbellekten cozulebilir ve testi yaniltir.
 dns_gate()
 {
     i=0
     while [ $i -lt 3 ]; do
-        for h in www.google.com example.com; do
+        for h in example.com www.bing.com wikipedia.org; do
             out=$(timeout 6 ping -c 1 $h 2>&1)
-            rc=$?
-            if [ $rc -eq 0 ]; then return 0; fi
-            if echo "$out" | grep -Eq '\([0-9]'; then return 0; fi
+            if echo "$out" | grep -Eq '\([0-9]'; then
+                return 0
+            fi
         done
         i=$((i+1))
         sleep 2
@@ -314,9 +352,7 @@ main()
 check_dpi()
 {
     [ -x "$NFQWS2" ] || return
-    alive=0
-    kill -0 "$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)" 2>/dev/null && alive=1
-    if [ "$alive" = "0" ]; then
+    if ! pid_alive "$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)" "nfqws2"; then
         log "nfqws2 durmus, yeniden baslatiliyor"
         if ! start_nfqws2; then
             DPIOFF=10
@@ -339,9 +375,7 @@ check_dpi()
 check_dns()
 {
     [ -x "$DNSPROXY" ] || return
-    alive=0
-    kill -0 "$(cat "$RUNDIR/dnsproxy.pid" 2>/dev/null)" 2>/dev/null && alive=1
-    if [ "$alive" = "0" ]; then
+    if ! pid_alive "$(cat "$RUNDIR/dnsproxy.pid" 2>/dev/null)" "dnsproxy"; then
         log "dnsproxy durmus, yeniden baslatiliyor"
         if ! start_dns; then
             log "dnsproxy tekrar baslamadi, DNS yonlendirme kaldiriliyor"
