@@ -1,6 +1,6 @@
 id=discord_dpi
-name=Discord DPI Bypass (NFQUEUE + DoH)
-version=2.0
-versionCode=2
+name=Discord DPI Bypass (zapret2 nfqws2 + DoH)
+version=4.0
+versionCode=4
 author=local
-description=Zapret nfqws + yerel DoH DNS. Discord web/app/ses destegi. nfqttl ile uyumlu (ona dokunmaz). Fail-open: DNS/DPI testi gecmezse otomatik devre disi kalir. VPN/uzak sunucu kullanmaz.
+description=zapret2/nfqws2 tcpseg stratejisi (TR'de test edildi) + yerel DoH DNS. Discord web/app destegi. nfqttl ile tam uyumlu, ona dokunmaz. VPN/uzak sunucu kullanmaz.
