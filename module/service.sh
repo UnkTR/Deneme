@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ============================================================
-#  discord_dpi - Magisk service.sh (v8)
+#  discord_dpi - Magisk service.sh (v10)
 #  Motor  : zapret2 / nfqws2 (Android ARM64)
 #  Strateji (ISS'de test edildi):
 #    --payload=tls_client_hello
@@ -9,20 +9,28 @@
 #  nfqttl ile UYUMLU: onun zincirlerine/kuyruguna dokunulmaz.
 #  IPv6 mudahalesi YOK. QUIC/UDP'ye dokunulmaz.
 #
-#  v8 DUZELTMELERI (v7 loglarindan tespit edildi):
-#  1) nfqws2, --uid ile yetki dusurunce Lua dosyalarini /data/adb
-#     altindan OKUYAMIYORDU ve hemen cikiyordu ("LUA file not
-#     accessible"). Lua dosyalari artik /data/local/tmp/discord_dpi_lua
-#     altina kopyalanip oradan yukleniyor.
-#  2) Bos pid dosyasi yuzunden surec "calisiyor" sanilabiliyordu.
-#     Artik pid_alive(): pid dolu + /proc girdisi var + cmdline'da
-#     isim geciyor kontrolu yapilir.
-#  3) DNS testi Google'a bagimli degildi; Google onbellekten
-#     cozulebildigi icin testi yanlis geciriyordu. Test artik
-#     example.com gibi Google OLMAYAN adlarla yapilir; basarisizsa
-#     DNS yonlendirme kurallari derhal geri alinir.
-#  4) dnsproxy upstream: 8.8.8.8, 1.0.0.1, 1.1.1.1, 9.9.9.9
-#     (parallel modda; biri blokluyse digeri cevap verir).
+#  v8 DUZELTMELERI:
+#  1) nfqws2 --uid ile yetki dusurunce Lua dosyalarini /data/adb
+#     altindan okuyamiyordu. Lua /data/local/tmp/discord_dpi_lua'ya
+#     kopyalanip oradan yukleniyor.
+#  2) pid_alive(): pid dolu + /proc girdisi + cmdline isim kontrolu.
+#  3) DNS testi Google'siz (example.com, bing, wikipedia).
+#  4) dnsproxy upstream IP-literal DoH + parallel (biri blokluysa
+#     digeri cevap verir).
+#
+#  v10 (TESHIS + DUZELTME):
+#  1) DPI kuyrugu artik ROOT trafigini (uid 0) kuyruklamaz
+#     (-m owner ! --uid-owner 0). Boylece dnsproxy'nin DoH trafigi
+#     tcpseg desync'ten muaf olur.
+#  2) AdGuard DoH upstream eklendi (94.140.15.15). 94.140.14.14 TR'de
+#     erisilemez (curl 000) oldugu icin alinmadi.
+#  3) dnsproxy -v: tum sorgular ve upstream olaylari dnsproxy.log'a.
+#  4) PROBE: busybox nslookup ile YONLENDIRME yolundan gercek sorgu
+#     (8.8.8.8:53 -> REDIRECT -> 127.0.0.1:5335). Gate fail ederse
+#     ping cikti satirlari + nat counterlari + conntrack + netstat
+#     service.log'a dokulur. Boylece sorunun netd tarafi mi
+#     (probe OK, gate FAIL) yoksa dnsproxy/redirect tarafi mi
+#     (probe FAIL) oldugu tek boot'ta anlasilir.
 # ============================================================
 
 PATH=/system/bin:/system/xbin:$PATH
@@ -48,6 +56,12 @@ mkdir -p "$RUNDIR" "$LOGDIR"
 DNSOFF=0
 DPIOFF=0
 
+# ping -W destegi var mi? (yoksa timeout'a guvenilir)
+PING_W=""
+if ! ping -W 1 -c 1 127.0.0.1 2>&1 | grep -qi "unknown"; then
+    PING_W="-W 2"
+fi
+
 log()
 {
     echo "$(date +%Y-%m-%d_%H:%M:%S) $*" >> "$LOGF"
@@ -56,6 +70,14 @@ log()
 have()
 {
     command -v "$1" >/dev/null 2>&1
+}
+
+find_busybox()
+{
+    for b in busybox /data/adb/magisk/busybox /data/adb/ksu/bin/busybox; do
+        if command -v "$b" >/dev/null 2>&1; then echo "$b"; return 0; fi
+    done
+    return 1
 }
 
 # pid dolu mu, /proc girdisi var mi, istege bagli isim eslesmesi
@@ -169,12 +191,12 @@ start_dns()
     [ -x "$DNSPROXY" ] || { log "HATA: dnsproxy bulunamadi"; return 1; }
     : > "$LOGDIR/dnsproxy.log"
 
-    # Upstream'ler IP-literal DoH: TR'de biri blokluysa digerleri
-    # cevap verir (parallel mod). Bootstrap kullanilmaz.
-    "$DNSPROXY" -l 0.0.0.0 -p $DNS_PORT \
+    # IP-literal DoH, parallel mod: biri blokluysa digerleri cevap verir.
+    # NOT: 94.140.14.14 TR'de erisilemiyor (curl 000) -> listede yok.
+    "$DNSPROXY" -v -l 0.0.0.0 -p $DNS_PORT \
         -u https://8.8.8.8/dns-query \
         -u https://1.0.0.1/dns-query \
-        -u https://1.1.1.1/dns-query \
+        -u https://94.140.15.15/dns-query \
         -u https://9.9.9.9/dns-query \
         --cache --cache-size=4194304 --upstream-mode=parallel --timeout=3s \
         >> "$LOGDIR/dnsproxy.log" 2>&1 &
@@ -258,14 +280,23 @@ add_dpi_rules()
         CB="-m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:9"
     fi
 
-    if ! iptables -t mangle -A DPI_TR_TCP -m mark ! --mark $MARK -p tcp -m multiport --dports $TCP_PORTS $CB -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null; then
+    # v10: root (uid 0) trafigi kuyruklanmaz -> dnsproxy DoH'u desync'ten muaf.
+    OC="-m owner ! --uid-owner 0"
+
+    if iptables -t mangle -A DPI_TR_TCP -m mark ! --mark $MARK $OC -p tcp -m multiport --dports $TCP_PORTS $CB -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null; then
+        log "DPI kurali eklendi (NFQUEUE $QNUM, root haric, connbytes)"
+    elif iptables -t mangle -A DPI_TR_TCP -m mark ! --mark $MARK $OC -p tcp -m multiport --dports $TCP_PORTS -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null; then
         CB=""
-        log "UYARI: connbytes kullanilamadi, TCP limitsiz"
+        log "DPI kurali eklendi (NFQUEUE $QNUM, root haric; connbytes yok)"
+    else
+        OC=""
+        CB=""
+        log "UYARI: owner eslesmesi kullanilamadi, root trafigi de kuyruklanir"
         iptables -t mangle -A DPI_TR_TCP -m mark ! --mark $MARK -p tcp -m multiport --dports $TCP_PORTS -j NFQUEUE --queue-num $QNUM --queue-bypass
     fi
 
     iptables -t mangle -A POSTROUTING -j DPI_TR_TCP
-    log "DPI kurallari eklendi (NFQUEUE $QNUM)"
+    log "DPI kurallari POSTROUTING'e baglandi"
 }
 
 # ---------- canli testler (fail-open kapilari) ----------
@@ -282,15 +313,55 @@ tcp_gate()
     return 1
 }
 
+# DNS yonlendirme yolunu dogrudan test eder (netd'e GIRMEZ):
+# busybox nslookup 8.8.8.8:53 -> iptables REDIRECT -> 127.0.0.1:5335
+# Basariliysa: redirect + dnsproxy + DoH zinciri saglam demektir.
+dns_probe()
+{
+    BB="$(find_busybox)"
+    if [ -z "$BB" ]; then log "PROBE atlandi: busybox yok"; return 0; fi
+    for h in example.com discord.com; do
+        t0=$(date +%s)
+        out=$(timeout 8 "$BB" nslookup "$h" 8.8.8.8 2>&1)
+        t1=$(date +%s)
+        res="FAIL"
+        echo "$out" | grep -q "Name:" && res="OK"
+        log "PROBE[$h] $res $((t1-t0))s: $(echo "$out" | tr '\n' '|' | cut -c1-350)"
+    done
+}
+
+# Gate fail edince sorunu yerinde belgelemek icin
+dump_dns_diag()
+{
+    log "DIAG ---- baslangic ----"
+    getprop 2>/dev/null | grep -i dns | head -n 15 >> "$LOGF"
+    log "DIAG nat OUTPUT:"
+    iptables -t nat -L OUTPUT -v -n 2>/dev/null >> "$LOGF"
+    log "DIAG nat PREROUTING:"
+    iptables -t nat -L PREROUTING -v -n 2>/dev/null >> "$LOGF"
+    log "DIAG dinleyiciler:"
+    netstat -ulpn 2>/dev/null | grep 5335 >> "$LOGF"
+    if [ -r /proc/net/nf_conntrack ]; then
+        log "DIAG conntrack(5335):"
+        grep 5335 /proc/net/nf_conntrack 2>/dev/null | head -n 8 >> "$LOGF"
+    fi
+    log "DIAG ---- son ----"
+}
+
 # Google KULLANILMAZ: onbellekten cozulebilir ve testi yaniltir.
 dns_gate()
 {
+    _logged=0
     i=0
     while [ $i -lt 3 ]; do
         for h in example.com www.bing.com wikipedia.org; do
-            out=$(timeout 6 ping -c 1 $h 2>&1)
+            out=$(timeout 6 ping $PING_W -c 1 $h 2>&1)
             if echo "$out" | grep -Eq '\([0-9]'; then
                 return 0
+            fi
+            if [ $_logged -eq 0 ]; then
+                log "DNS_GATE ilk hata [$h]: $(echo "$out" | tr '\n' '|' | cut -c1-300)"
+                _logged=1
             fi
         done
         i=$((i+1))
@@ -335,10 +406,14 @@ main()
 
     if start_dns; then
         add_dns_rules
+        sleep 1
+        dns_probe
         if dns_gate; then
             log "DNS testi BASARILI"
         else
             log "HATA: DNS testi BASARISIZ -> DNS yonlendirme geri alindi (internet korunur)"
+            dns_probe
+            dump_dns_diag
             cleanup_dns_rules
             kill_dns
             DNSOFF=10
