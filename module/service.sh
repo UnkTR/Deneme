@@ -1,36 +1,21 @@
 #!/system/bin/sh
 # ============================================================
-#  discord_dpi - Magisk service.sh (v10)
+#  discord_dpi - Magisk service.sh (v11)
 #  Motor  : zapret2 / nfqws2 (Android ARM64)
-#  Strateji (ISS'de test edildi):
-#    --payload=tls_client_hello
-#    --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
-#  DNS    : dnsproxy (DoH :5335)
+#  Strateji: --payload=tls_client_hello
+#            --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
+#  DNS    : dnsproxy (DoH :5335) + iptables REDIRECT (telefon + hotspot)
 #  nfqttl ile UYUMLU: onun zincirlerine/kuyruguna dokunulmaz.
-#  IPv6 mudahalesi YOK. QUIC/UDP'ye dokunulmaz.
 #
-#  v8 DUZELTMELERI:
-#  1) nfqws2 --uid ile yetki dusurunce Lua dosyalarini /data/adb
-#     altindan okuyamiyordu. Lua /data/local/tmp/discord_dpi_lua'ya
-#     kopyalanip oradan yukleniyor.
-#  2) pid_alive(): pid dolu + /proc girdisi + cmdline isim kontrolu.
-#  3) DNS testi Google'siz (example.com, bing, wikipedia).
-#  4) dnsproxy upstream IP-literal DoH + parallel (biri blokluysa
-#     digeri cevap verir).
-#
-#  v10 (TESHIS + DUZELTME):
-#  1) DPI kuyrugu artik ROOT trafigini (uid 0) kuyruklamaz
-#     (-m owner ! --uid-owner 0). Boylece dnsproxy'nin DoH trafigi
-#     tcpseg desync'ten muaf olur.
-#  2) AdGuard DoH upstream eklendi (94.140.15.15). 94.140.14.14 TR'de
-#     erisilemez (curl 000) oldugu icin alinmadi.
-#  3) dnsproxy -v: tum sorgular ve upstream olaylari dnsproxy.log'a.
-#  4) PROBE: busybox nslookup ile YONLENDIRME yolundan gercek sorgu
-#     (8.8.8.8:53 -> REDIRECT -> 127.0.0.1:5335). Gate fail ederse
-#     ping cikti satirlari + nat counterlari + conntrack + netstat
-#     service.log'a dokulur. Boylece sorunun netd tarafi mi
-#     (probe OK, gate FAIL) yoksa dnsproxy/redirect tarafi mi
-#     (probe FAIL) oldugu tek boot'ta anlasilir.
+#  v11 (DNS DUZELTMESI):
+#  - Teshis: REDIRECT zinciri calisiyor (netd ve nslookup sorgulari
+#    127.0.0.1:5335'ten cevap aliyor) ama dnsproxy'nin tum DoH
+#    upstream'leri aninda basarisiz oluyordu (SERVFAIL).
+#  - Olasi neden: Go/dnsproxy Android'de kok sertifikalari bulamiyor.
+#  - Cozum: sirayla 3 CA kaynagi denenir (modul ici Mozilla paketi,
+#    APEX conscrypt dizini, sistem dizini). Her aday icin gercek DNS
+#    sorgusu (REDIRECT yolundan) yapilir, calisan secilir.
+#  - Basarisizlikta dnsproxy.log'un son satirlari service.log'a dokulur.
 # ============================================================
 
 PATH=/system/bin:/system/xbin:$PATH
@@ -51,6 +36,9 @@ DNS_PORT=5335
 MARK="0x40000000/0x40000000"
 TCP_PORTS="80,443"
 WAN_IFACES="rmnet_data+ rmnet+ ccmni+"
+
+# dnsproxy icin CA adaylari (sirayla denenir)
+CA_CANDS="file:$MODDIR/cacert.pem dir:/apex/com.android.conscrypt/cacerts dir:/system/etc/security/cacerts"
 
 mkdir -p "$RUNDIR" "$LOGDIR"
 DNSOFF=0
@@ -118,6 +106,7 @@ kill_dns()
     if [ -f "$RUNDIR/dnsproxy.pid" ]; then
         kill_if_ours "$(cat "$RUNDIR/dnsproxy.pid" 2>/dev/null)" "dnsproxy" "$RUNDIR/dnsproxy.pid"
     fi
+    sleep 1
 }
 
 kill_procs()
@@ -186,10 +175,24 @@ cleanup_dpi_rules()
 }
 
 # ---------- dnsproxy ----------
+# $1 = "file:<yol>" | "dir:<yol>" | "" (varsayilan)
 start_dns()
 {
     [ -x "$DNSPROXY" ] || { log "HATA: dnsproxy bulunamadi"; return 1; }
-    : > "$LOGDIR/dnsproxy.log"
+    _ca="$1"
+
+    echo "=== dnsproxy baslatiliyor (CA: ${_ca:-varsayilan}) ===" >> "$LOGDIR/dnsproxy.log"
+
+    case "$_ca" in
+        file:*)
+            export SSL_CERT_FILE="${_ca#file:}"
+            export SSL_CERT_DIR=/dev/null
+            ;;
+        dir:*)
+            export SSL_CERT_DIR="${_ca#dir:}"
+            export SSL_CERT_FILE=/dev/null
+            ;;
+    esac
 
     # IP-literal DoH, parallel mod: biri blokluysa digerleri cevap verir.
     # NOT: 94.140.14.14 TR'de erisilemiyor (curl 000) -> listede yok.
@@ -201,9 +204,12 @@ start_dns()
         --cache --cache-size=4194304 --upstream-mode=parallel --timeout=3s \
         >> "$LOGDIR/dnsproxy.log" 2>&1 &
     echo $! > "$RUNDIR/dnsproxy.pid"
+
+    unset SSL_CERT_FILE SSL_CERT_DIR
+
     sleep 2
     if pid_alive "$(cat "$RUNDIR/dnsproxy.pid" 2>/dev/null)" "dnsproxy"; then
-        log "dnsproxy calisiyor (port $DNS_PORT)"
+        log "dnsproxy calisiyor (port $DNS_PORT, CA: ${_ca:-varsayilan})"
         return 0
     fi
     log "HATA: dnsproxy baslatilamadi ($LOGDIR/dnsproxy.log)"
@@ -280,7 +286,7 @@ add_dpi_rules()
         CB="-m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:9"
     fi
 
-    # v10: root (uid 0) trafigi kuyruklanmaz -> dnsproxy DoH'u desync'ten muaf.
+    # root (uid 0) trafigi kuyruklanmaz -> dnsproxy DoH'u desync'ten muaf.
     OC="-m owner ! --uid-owner 0"
 
     if iptables -t mangle -A DPI_TR_TCP -m mark ! --mark $MARK $OC -p tcp -m multiport --dports $TCP_PORTS $CB -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null; then
@@ -315,19 +321,57 @@ tcp_gate()
 
 # DNS yonlendirme yolunu dogrudan test eder (netd'e GIRMEZ):
 # busybox nslookup 8.8.8.8:53 -> iptables REDIRECT -> 127.0.0.1:5335
-# Basariliysa: redirect + dnsproxy + DoH zinciri saglam demektir.
+# Donus: 0 = en az bir host cozuldu, 1 = hicbiri cozulmedi
 dns_probe()
 {
     BB="$(find_busybox)"
     if [ -z "$BB" ]; then log "PROBE atlandi: busybox yok"; return 0; fi
+    _ok=1
     for h in example.com discord.com; do
         t0=$(date +%s)
         out=$(timeout 8 "$BB" nslookup "$h" 8.8.8.8 2>&1)
         t1=$(date +%s)
         res="FAIL"
-        echo "$out" | grep -q "Name:" && res="OK"
+        if echo "$out" | grep -q "Name:"; then
+            res="OK"
+            _ok=0
+        fi
         log "PROBE[$h] $res $((t1-t0))s: $(echo "$out" | tr '\n' '|' | cut -c1-350)"
     done
+    return $_ok
+}
+
+# Her CA adayi icin: dnsproxy baslat -> REDIRECT ekle -> gercek sorgu dene.
+# Calisan ilk adayda durur (kurallar yerinde kalir). Hicbiri calismazsa 1.
+setup_dns_stack()
+{
+    for c in $CA_CANDS; do
+        case "$c" in
+            file:*) [ -s "${c#file:}" ] || { log "CA adayi yok, atlandi: $c"; continue; } ;;
+            dir:*)  [ -d "${c#dir:}" ]  || { log "CA adayi yok, atlandi: $c"; continue; } ;;
+        esac
+
+        cleanup_dns_rules
+        kill_dns
+
+        if ! start_dns "$c"; then
+            continue
+        fi
+
+        add_dns_rules
+        sleep 1
+        if dns_probe; then
+            log "DNS CA SECILDI: $c (DoH calisiyor)"
+            return 0
+        fi
+
+        log "DNS CA adayi basarisiz: $c"
+        log "dnsproxy.log son satirlar:"
+        tail -n 12 "$LOGDIR/dnsproxy.log" 2>/dev/null >> "$LOGF"
+        cleanup_dns_rules
+        kill_dns
+    done
+    return 1
 }
 
 # Gate fail edince sorunu yerinde belgelemek icin
@@ -335,16 +379,16 @@ dump_dns_diag()
 {
     log "DIAG ---- baslangic ----"
     getprop 2>/dev/null | grep -i dns | head -n 15 >> "$LOGF"
+    log "DIAG dnsproxy.log (son 30 satir):"
+    tail -n 30 "$LOGDIR/dnsproxy.log" 2>/dev/null >> "$LOGF"
     log "DIAG nat OUTPUT:"
     iptables -t nat -L OUTPUT -v -n 2>/dev/null >> "$LOGF"
     log "DIAG nat PREROUTING:"
     iptables -t nat -L PREROUTING -v -n 2>/dev/null >> "$LOGF"
     log "DIAG dinleyiciler:"
     netstat -ulpn 2>/dev/null | grep 5335 >> "$LOGF"
-    if [ -r /proc/net/nf_conntrack ]; then
-        log "DIAG conntrack(5335):"
-        grep 5335 /proc/net/nf_conntrack 2>/dev/null | head -n 8 >> "$LOGF"
-    fi
+    log "DIAG CA dizinleri:"
+    ls -d /apex/com.android.conscrypt/cacerts /system/etc/security/cacerts "$MODDIR/cacert.pem" 2>&1 >> "$LOGF"
     log "DIAG ---- son ----"
 }
 
@@ -404,20 +448,23 @@ main()
         fi
     fi
 
-    if start_dns; then
-        add_dns_rules
-        sleep 1
-        dns_probe
+    : > "$LOGDIR/dnsproxy.log"
+    if setup_dns_stack; then
         if dns_gate; then
             log "DNS testi BASARILI"
         else
-            log "HATA: DNS testi BASARISIZ -> DNS yonlendirme geri alindi (internet korunur)"
-            dns_probe
+            log "HATA: DNS_GATE (netd yolu) BASARISIZ -> DNS yonlendirme geri alindi (internet korunur)"
             dump_dns_diag
             cleanup_dns_rules
             kill_dns
             DNSOFF=10
         fi
+    else
+        log "HATA: hicbir CA adayiyla DoH calismadi -> DNS yonlendirme yok (internet korunur)"
+        dump_dns_diag
+        cleanup_dns_rules
+        kill_dns
+        DNSOFF=10
     fi
 
     log "baslatma tamamlandi"
@@ -452,9 +499,10 @@ check_dns()
     [ -x "$DNSPROXY" ] || return
     if ! pid_alive "$(cat "$RUNDIR/dnsproxy.pid" 2>/dev/null)" "dnsproxy"; then
         log "dnsproxy durmus, yeniden baslatiliyor"
-        if ! start_dns; then
-            log "dnsproxy tekrar baslamadi, DNS yonlendirme kaldiriliyor"
+        if ! setup_dns_stack; then
+            log "dnsproxy/DoH tekrar calismadi, DNS yonlendirme kaldiriliyor"
             cleanup_dns_rules
+            kill_dns
             DNSOFF=10
             return
         fi
