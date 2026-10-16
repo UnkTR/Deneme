@@ -1,0 +1,55 @@
+name: build-module
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download zapret (nfqws android-arm64)
+        run: |
+          curl -fL --retry 3 -o zapret.tar.gz \
+            https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz
+          tar -xzf zapret.tar.gz
+          echo "cccf077972d9d8f378c04e8b97a12cfefeca3370d9ab558772b101c3736e250a  zapret-v72.13/binaries/android-arm64/nfqws" | sha256sum -c -
+
+      - name: Download dnsproxy (linux-arm64)
+        run: |
+          curl -fL --retry 3 -o dnsproxy.tar.gz \
+            https://github.com/AdguardTeam/dnsproxy/releases/download/v0.86.0/dnsproxy-linux-arm64-v0.86.0.tar.gz
+          echo "eda840d39da0c2777ea2431d3d73407e813e3fc0e411bfe256a9fb4b97d08247  dnsproxy.tar.gz" | sha256sum -c -
+          tar -xzf dnsproxy.tar.gz
+
+      - name: Assemble module
+        run: |
+          MOD=discord_dpi
+          mkdir -p $MOD/system/bin $MOD/fake
+          cp module/module.prop $MOD/
+          cp module/service.sh $MOD/
+          cp module/uninstall.sh $MOD/
+          cp zapret-v72.13/binaries/android-arm64/nfqws $MOD/system/bin/nfqws
+          cp linux-arm64/dnsproxy $MOD/system/bin/dnsproxy
+          cp zapret-v72.13/files/fake/discord-ip-discovery-with-port.bin $MOD/fake/ || true
+          cp zapret-v72.13/files/fake/discord-ip-discovery-without-port.bin $MOD/fake/ || true
+          cp zapret-v72.13/files/fake/stun.bin $MOD/fake/ || true
+          chmod 755 $MOD/system/bin/nfqws $MOD/system/bin/dnsproxy $MOD/service.sh $MOD/uninstall.sh
+          ( cd $MOD && zip -r -X ../discord_dpi_vodafone.zip module.prop service.sh uninstall.sh system fake )
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord_dpi_vodafone
+          path: discord_dpi_vodafone.zip
+
+      - name: Attach to release (sadece tag push'unda)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" discord_dpi_vodafone.zip --generate-notes
