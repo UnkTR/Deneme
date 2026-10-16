@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# discord_dpi uninstall - v4 (v2/v3 kalintilarini da temizler)
+# discord_dpi uninstall - v6 (eski surum kalintilarini da temizler)
 
 PATH=/system/bin:/system/xbin:$PATH
 
@@ -26,6 +26,9 @@ kill_if_ours()
 if [ -f "$RUNDIR/service.pid" ]; then
     kill_if_ours "$(cat "$RUNDIR/service.pid" 2>/dev/null)" "service.sh" "$RUNDIR/service.pid"
 fi
+if [ -f "$RUNDIR/nfqws2.pid" ]; then
+    kill_if_ours "$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)" "nfqws2" "$RUNDIR/nfqws2.pid"
+fi
 if [ -f "$RUNDIR/nfqws.pid" ]; then
     kill_if_ours "$(cat "$RUNDIR/nfqws.pid" 2>/dev/null)" "nfqws" "$RUNDIR/nfqws.pid"
 fi
@@ -50,6 +53,13 @@ while ip6tables -D OUTPUT -p tcp --dport 53 -j REJECT 2>/dev/null; do :; done
 while ip6tables -D FORWARD -p udp --dport 53 -j REJECT 2>/dev/null; do :; done
 while ip6tables -D FORWARD -p tcp --dport 53 -j REJECT 2>/dev/null; do :; done
 
+while iptables -t mangle -D POSTROUTING -j DPI_TR_TCP 2>/dev/null; do :; done
+while iptables -t mangle -D POSTROUTING -j DPI_TR_UDP 2>/dev/null; do :; done
+iptables -t mangle -F DPI_TR_TCP 2>/dev/null
+iptables -t mangle -F DPI_TR_UDP 2>/dev/null
+iptables -t mangle -X DPI_TR_TCP 2>/dev/null
+iptables -t mangle -X DPI_TR_UDP 2>/dev/null
+
 while iptables -t mangle -D OUTPUT -j DPI_OUT_TCP 2>/dev/null; do :; done
 while iptables -t mangle -D OUTPUT -j DPI_OUT_UDP 2>/dev/null; do :; done
 while iptables -t mangle -D FORWARD -j DPI_FWD_TCP 2>/dev/null; do :; done
@@ -62,13 +72,6 @@ iptables -t mangle -X DPI_OUT_TCP 2>/dev/null
 iptables -t mangle -X DPI_OUT_UDP 2>/dev/null
 iptables -t mangle -X DPI_FWD_TCP 2>/dev/null
 iptables -t mangle -X DPI_FWD_UDP 2>/dev/null
-
-while iptables -t mangle -D POSTROUTING -j DPI_TR_TCP 2>/dev/null; do :; done
-while iptables -t mangle -D POSTROUTING -j DPI_TR_UDP 2>/dev/null; do :; done
-iptables -t mangle -F DPI_TR_TCP 2>/dev/null
-iptables -t mangle -F DPI_TR_UDP 2>/dev/null
-iptables -t mangle -X DPI_TR_TCP 2>/dev/null
-iptables -t mangle -X DPI_TR_UDP 2>/dev/null
 
 while ip6tables -t mangle -D POSTROUTING -j DPI_TR6_TCP 2>/dev/null; do :; done
 while ip6tables -t mangle -D POSTROUTING -j DPI_TR6_UDP 2>/dev/null; do :; done
