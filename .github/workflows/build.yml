@@ -36,7 +36,10 @@ jobs:
       - name: Assemble module
         run: |
           MOD=discord_dpi
-          mkdir -p $MOD/system/bin $MOD/lua
+          test -s module/lists/user-hosts.txt || { echo "module/lists/user-hosts.txt eksik"; exit 1; }
+          sed -i 's/\r$//' module/service.sh module/uninstall.sh module/module.prop module/lists/user-hosts.txt
+
+          mkdir -p $MOD/system/bin $MOD/lua $MOD/lists $MOD/blobs
           cp module/module.prop $MOD/
           cp module/service.sh $MOD/
           cp module/uninstall.sh $MOD/
@@ -44,9 +47,24 @@ jobs:
           cp zapret2-v1.0.5.2/binaries/android-arm64/nfqws2 $MOD/system/bin/nfqws2
           cp linux-arm64/dnsproxy $MOD/system/bin/dnsproxy
           cp zapret2-v1.0.5.2/lua/*.lua $MOD/lua/
+
+          # hostlist dosyalari (autohostlist bos baslar, nfqws2 doldurur)
+          cp module/lists/user-hosts.txt $MOD/lists/user-hosts.txt
+          : > $MOD/lists/autohostlist.txt
+
+          # QUIC sahte paket blob'u (UDP 443 profili icin)
+          Q=$(find zapret2-v1.0.5.2 -name 'quic_initial_www_google_com.bin' | head -n1)
+          if [ -n "$Q" ]; then
+            cp "$Q" $MOD/blobs/quic_initial.bin
+          else
+            echo "::warning::quic_initial blob bulunamadi, QUIC profili devre disi kalacak"
+          fi
+
           chmod 755 $MOD/system/bin/nfqws2 $MOD/system/bin/dnsproxy $MOD/service.sh $MOD/uninstall.sh
-          chmod 644 $MOD/lua/*.lua $MOD/cacert.pem
-          ( cd $MOD && zip -r -X ../discord_dpi_vodafone.zip module.prop service.sh uninstall.sh cacert.pem system lua )
+          chmod 644 $MOD/lua/*.lua $MOD/cacert.pem $MOD/lists/user-hosts.txt
+          chmod 777 $MOD/lists
+          chmod 666 $MOD/lists/autohostlist.txt
+          ( cd $MOD && zip -r -X ../discord_dpi_vodafone.zip module.prop service.sh uninstall.sh cacert.pem system lua lists blobs )
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
