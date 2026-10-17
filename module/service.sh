@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ============================================================
-#  discord_dpi - Magisk service.sh (v11)
+#  discord_dpi - Magisk service.sh (v12)
 #  Motor  : zapret2 / nfqws2 (Android ARM64)
 #  Strateji: --payload=tls_client_hello
 #            --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
@@ -16,6 +16,19 @@
 #    APEX conscrypt dizini, sistem dizini). Her aday icin gercek DNS
 #    sorgusu (REDIRECT yolundan) yapilir, calisan secilir.
 #  - Basarisizlikta dnsproxy.log'un son satirlari service.log'a dokulur.
+#
+#  v12 (HOSTLIST + AUTOHOSTLIST):
+#  - DPI desync SADECE lists/user-hosts.txt + otomatik tespit edilen
+#    (autohostlist) sitelere uygulanir. Diger siteler (Google, YouTube,
+#    speedtest vb.) dokunulmadan gecer -> hiz/gecikme duser degil artar.
+#  - Giden (POSTROUTING) + gelen (PREROUTING, DPI_TR_IN: ilk 6 reply
+#    paketi ve RST) paketler NFQUEUE 200'e girer; nfqws2 hem RST/redirect
+#    hem retransmission ile engeli tespit eder.
+#  - QUIC (UDP 443) ayni listelere baglandi. Discord ses (l7=discord) ve
+#    STUN (l7=stun) hostlist'ten BAGIMSIZ, her zaman aktif.
+#  - nfqws2 --uid=1:3003 ile /data/adb'ye yazamaz: canli listeler
+#    /data/local/tmp/discord_dpi_lists altinda (777/666), autohostlist
+#    periyodik olarak $MODDIR/lists/autohostlist.txt'e yedeklenir.
 # ============================================================
 
 PATH=/system/bin:/system/xbin:$PATH
@@ -30,6 +43,13 @@ LOGDIR="$MODDIR/log"
 NFQWS2="$BINDIR/nfqws2"
 DNSPROXY="$BINDIR/dnsproxy"
 LOGF="$LOGDIR/service.log"
+
+# hostlist dosyalari (canli kopya: uid 1 erisebilsin diye /data/local/tmp)
+MODLISTS="$MODDIR/lists"
+LISTS=/data/local/tmp/discord_dpi_lists
+UH="$LISTS/user-hosts.txt"
+AH="$LISTS/autohostlist.txt"
+DBG="$LISTS/autohostlist.debug.log"
 
 QNUM=200
 DNS_PORT=5335
@@ -93,6 +113,7 @@ kill_if_ours()
 
 kill_nfqws()
 {
+    sync_autolist
     if [ -f "$RUNDIR/nfqws2.pid" ]; then
         kill_if_ours "$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)" "nfqws2" "$RUNDIR/nfqws2.pid"
     fi
@@ -163,6 +184,10 @@ cleanup_dpi_rules()
     ip6tables -t mangle -X DPI_TR6_TCP 2>/dev/null
     ip6tables -t mangle -X DPI_TR6_UDP 2>/dev/null
 
+    while iptables -t mangle -D PREROUTING -j DPI_TR_IN 2>/dev/null; do :; done
+    iptables -t mangle -F DPI_TR_IN 2>/dev/null
+    iptables -t mangle -X DPI_TR_IN 2>/dev/null
+
     while iptables -t mangle -D POSTROUTING -m mark --mark $MARK -j CONNMARK --or-mark 0x40000000 2>/dev/null; do :; done
     while iptables -D INPUT -p icmp --icmp-type time-exceeded -m connmark --mark $MARK -j DROP 2>/dev/null; do :; done
     while iptables -D FORWARD -p icmp --icmp-type time-exceeded -m connmark --mark $MARK -j DROP 2>/dev/null; do :; done
@@ -216,7 +241,84 @@ start_dns()
     return 1
 }
 
+# ---------- hostlist dosyalari ----------
+setup_lists()
+{
+    mkdir -p "$LISTS" "$MODLISTS" 2>/dev/null
+    chmod 777 "$LISTS" "$MODLISTS" 2>/dev/null
+
+    # sabit liste her acilista modulden yenilenir (duzenlemeler gecerli olsun)
+    if [ -f "$MODLISTS/user-hosts.txt" ]; then
+        cp -f "$MODLISTS/user-hosts.txt" "$UH" 2>/dev/null
+    fi
+    [ -f "$UH" ] || : > "$UH"
+
+    # autohostlist KALICI: varsa dokunulmaz, yoksa modul kopyasindan/bos olusur
+    if [ ! -f "$AH" ]; then
+        if [ -f "$MODLISTS/autohostlist.txt" ]; then
+            cp -f "$MODLISTS/autohostlist.txt" "$AH" 2>/dev/null
+        else
+            : > "$AH"
+        fi
+    fi
+    [ -f "$MODLISTS/autohostlist.txt" ] || cp -f "$AH" "$MODLISTS/autohostlist.txt" 2>/dev/null
+    [ -f "$DBG" ] || : > "$DBG"
+
+    chmod 644 "$UH" 2>/dev/null
+    chmod 666 "$AH" "$DBG" "$MODLISTS/autohostlist.txt" 2>/dev/null
+}
+
+sync_autolist()
+{
+    [ -f "$AH" ] || return 0
+    cmp -s "$AH" "$MODLISTS/autohostlist.txt" 2>/dev/null && return 0
+    cp -f "$AH" "$MODLISTS/autohostlist.txt" 2>/dev/null
+    chmod 666 "$MODLISTS/autohostlist.txt" 2>/dev/null
+}
+
 # ---------- nfqws2 (zapret2) ----------
+# $1 = seviye: 0 tam | 1 fail-threshold/time parametresiz | 2 sadece TCP
+build_nfqws2_args()
+{
+    _lvl="$1"
+    _a="--qnum=$QNUM --daemon --pidfile=$RUNDIR/nfqws2.pid"
+    _a="$_a --uid=1:3003 --bind-fix4 --bind-fix6 --fwmark=0x40000000"
+    _a="$_a --debug=@$LOGDIR/nfqws2.log"
+    _a="$_a --lua-init=@$LUATMP/zapret-lib.lua"
+    _a="$_a --lua-init=@$LUATMP/zapret-antidpi.lua"
+
+    _haveq=0
+    if [ "$_lvl" -lt 2 ] && [ -s "$LUATMP/quic_initial.bin" ]; then
+        _haveq=1
+        _a="$_a --blob=quic_initial:@$LUATMP/quic_initial.bin"
+    fi
+
+    _hl="--hostlist=$UH --hostlist-auto=$AH"
+    _auto="--hostlist-auto-retrans-threshold=3 --hostlist-auto-debug=$DBG"
+    if [ "$_lvl" -eq 0 ]; then
+        _auto="$_auto --hostlist-auto-fail-threshold=3 --hostlist-auto-fail-time=60"
+    fi
+
+    # Profil 1: TCP 80/443 - sadece listedeki / otomatik tespit edilen siteler
+    _a="$_a --filter-tcp=$TCP_PORTS $_hl $_auto"
+    _a="$_a --payload=tls_client_hello"
+    _a="$_a --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1"
+
+    if [ "$_lvl" -lt 2 ]; then
+        # Profil 2: QUIC (UDP 443) - ayni listeler
+        if [ $_haveq -eq 1 ]; then
+            _a="$_a --new --filter-udp=443 --filter-l7=quic $_hl"
+            _a="$_a --payload=quic_initial"
+            _a="$_a --lua-desync=fake:blob=quic_initial:repeats=6"
+        fi
+        # Profil 3: Discord ses + STUN - hostlist'ten BAGIMSIZ, hep aktif
+        _a="$_a --new --filter-udp=1-65535 --filter-l7=discord,stun"
+        _a="$_a --payload=stun,discord_ip_discovery"
+        _a="$_a --lua-desync=fake:blob=0x00000000000000000000000000000000:ip_ttl=4:ip6_ttl=4:repeats=6"
+    fi
+    echo "$_a"
+}
+
 start_nfqws2()
 {
     [ -x "$NFQWS2" ] || { log "HATA: nfqws2 bulunamadi"; return 1; }
@@ -227,36 +329,42 @@ start_nfqws2()
     rm -rf "$LUATMP" 2>/dev/null
     mkdir -p "$LUATMP" 2>/dev/null
     cp -f "$LUADIR"/*.lua "$LUATMP"/ 2>/dev/null
+    if [ -s "$MODDIR/blobs/quic_initial.bin" ]; then
+        cp -f "$MODDIR/blobs/quic_initial.bin" "$LUATMP/quic_initial.bin" 2>/dev/null
+    else
+        log "UYARI: blobs/quic_initial.bin yok, QUIC profili devre disi"
+    fi
     if [ ! -f "$LUATMP/zapret-lib.lua" ] || [ ! -f "$LUATMP/zapret-antidpi.lua" ]; then
         log "HATA: lua dosyalari $LUATMP altina kopyalanamadi"
         return 1
     fi
     chmod 755 "$LUATMP" 2>/dev/null
-    chmod 644 "$LUATMP"/*.lua 2>/dev/null
+    chmod 644 "$LUATMP"/*.lua "$LUATMP"/*.bin 2>/dev/null
 
-    : > "$LOGDIR/nfqws2.log"
-    chmod 666 "$LOGDIR/nfqws2.log" 2>/dev/null
-    : > "$RUNDIR/nfqws2.pid"
-    chmod 666 "$RUNDIR/nfqws2.pid" 2>/dev/null
+    setup_lists
+    echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null
 
-    "$NFQWS2" --qnum=$QNUM --daemon --pidfile="$RUNDIR/nfqws2.pid" \
-        --uid=1:3003 --bind-fix4 --bind-fix6 --fwmark=0x40000000 \
-        --debug=@$LOGDIR/nfqws2.log \
-        --lua-init=@"$LUATMP/zapret-lib.lua" \
-        --lua-init=@"$LUATMP/zapret-antidpi.lua" \
-        --payload=tls_client_hello \
-        --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1 \
-        >> "$LOGDIR/nfqws2.log" 2>&1
-    sleep 2
-    _pid="$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)"
-    if pid_alive "$_pid" "nfqws2"; then
-        log "nfqws2 calisiyor (qnum $QNUM, tcpseg, uid=1:3003, pid $_pid)"
-        return 0
-    fi
+    for _lvl in 0 1 2; do
+        : > "$LOGDIR/nfqws2.log"
+        chmod 666 "$LOGDIR/nfqws2.log" 2>/dev/null
+        : > "$RUNDIR/nfqws2.pid"
+        chmod 666 "$RUNDIR/nfqws2.pid" 2>/dev/null
+
+        _args="$(build_nfqws2_args $_lvl)"
+        "$NFQWS2" $_args >> "$LOGDIR/nfqws2.log" 2>&1
+        sleep 2
+        _pid="$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)"
+        if pid_alive "$_pid" "nfqws2"; then
+            log "nfqws2 calisiyor (qnum $QNUM, hostlist+autohostlist, seviye $_lvl, uid=1:3003, pid $_pid)"
+            return 0
+        fi
+        log "UYARI: nfqws2 seviye $_lvl baslamadi: $(tail -n 3 "$LOGDIR/nfqws2.log" 2>/dev/null | tr '\n' '|' | cut -c1-300)"
+    done
+
     if grep -q "not accessible" "$LOGDIR/nfqws2.log" 2>/dev/null; then
         log "HATA: nfqws2 lua dosyalarina erisemiyor (izin sorunu)"
     fi
-    log "HATA: nfqws2 baslatilamadi (pid='$_pid', $LOGDIR/nfqws2.log)"
+    log "HATA: nfqws2 baslatilamadi ($LOGDIR/nfqws2.log)"
     return 1
 }
 
@@ -271,15 +379,22 @@ add_dns_rules()
 }
 
 # ---------- DPI kurallari (mangle POSTROUTING: yerel + hotspot) ----------
+# Giden : DPI_TR_TCP (80/443) + DPI_TR_UDP (QUIC 443, Discord ses, STUN)
+# Gelen : DPI_TR_IN  (PREROUTING; sunucudan donen ilk paketler + RST)
+#         -> nfqws2 autohostlist engel tespiti (RST / redirect / retrans)
 add_dpi_rules()
 {
-    iptables -t mangle -N DPI_TR_TCP 2>/dev/null
+    LAN_NETS="127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10"
 
-    iptables -t mangle -A DPI_TR_TCP -d 127.0.0.0/8 -j RETURN
-    iptables -t mangle -A DPI_TR_TCP -d 10.0.0.0/8 -j RETURN
-    iptables -t mangle -A DPI_TR_TCP -d 172.16.0.0/12 -j RETURN
-    iptables -t mangle -A DPI_TR_TCP -d 192.168.0.0/16 -j RETURN
-    iptables -t mangle -A DPI_TR_TCP -d 100.64.0.0/10 -j RETURN
+    iptables -t mangle -N DPI_TR_TCP 2>/dev/null
+    iptables -t mangle -N DPI_TR_UDP 2>/dev/null
+    iptables -t mangle -N DPI_TR_IN 2>/dev/null
+
+    for n in $LAN_NETS; do
+        iptables -t mangle -A DPI_TR_TCP -d $n -j RETURN
+        iptables -t mangle -A DPI_TR_UDP -d $n -j RETURN
+        iptables -t mangle -A DPI_TR_IN -s $n -j RETURN
+    done
 
     CB=""
     if iptables -m connbytes --help >/dev/null 2>&1; then
@@ -301,8 +416,22 @@ add_dpi_rules()
         iptables -t mangle -A DPI_TR_TCP -m mark ! --mark $MARK -p tcp -m multiport --dports $TCP_PORTS -j NFQUEUE --queue-num $QNUM --queue-bypass
     fi
 
+    # UDP: QUIC (443) + Discord ses / STUN portlari
+    iptables -t mangle -A DPI_TR_UDP -m mark ! --mark $MARK $OC -p udp --dport 443 $CB -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null
+    iptables -t mangle -A DPI_TR_UDP -m mark ! --mark $MARK $OC -p udp -m multiport --dports 3478:3481,19294:19344,50000:65535 $CB -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null
+
+    # Gelen: RST her zaman, SYN/ACK + ServerHello/redirect icin ilk 6 reply paketi
+    iptables -t mangle -A DPI_TR_IN -p tcp -m multiport --sports $TCP_PORTS --tcp-flags RST RST -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null
+    if [ -n "$CB" ]; then
+        iptables -t mangle -A DPI_TR_IN -p tcp -m multiport --sports $TCP_PORTS -m connbytes --connbytes-dir=reply --connbytes-mode=packets --connbytes 1:6 -j NFQUEUE --queue-num $QNUM --queue-bypass 2>/dev/null
+    else
+        log "UYARI: connbytes yok, gelen paket kancasi sadece RST ile sinirli"
+    fi
+
     iptables -t mangle -A POSTROUTING -j DPI_TR_TCP
-    log "DPI kurallari POSTROUTING'e baglandi"
+    iptables -t mangle -A POSTROUTING -j DPI_TR_UDP
+    iptables -t mangle -I PREROUTING 1 -j DPI_TR_IN
+    log "DPI kurallari POSTROUTING + PREROUTING'e baglandi"
 }
 
 # ---------- canli testler (fail-open kapilari) ----------
@@ -481,7 +610,9 @@ check_dpi()
             return
         fi
     fi
-    if ! iptables -t mangle -C POSTROUTING -j DPI_TR_TCP 2>/dev/null; then
+    if ! iptables -t mangle -C POSTROUTING -j DPI_TR_TCP 2>/dev/null \
+        || ! iptables -t mangle -C POSTROUTING -j DPI_TR_UDP 2>/dev/null \
+        || ! iptables -t mangle -C PREROUTING -j DPI_TR_IN 2>/dev/null; then
         log "DPI kurallari eksik, yeniden ekleniyor"
         cleanup_dpi_rules
         add_dpi_rules
@@ -522,6 +653,7 @@ check_dns()
 
 periodic_health()
 {
+    sync_autolist
     if iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports $DNS_PORT 2>/dev/null; then
         if ! dns_gate; then
             log "PERIYODIK: DNS testi basarisiz -> DNS yonlendirme kaldiriliyor"
