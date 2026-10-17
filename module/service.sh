@@ -52,6 +52,10 @@
 #  - Kalici kullanici listesi: lists/exclude-user.txt (/data/local/tmp altinda,
 #    yeniden baslatmada silinmez). Sonra: sh service.sh refresh
 #  - autohostlist temizligi tek geciste yapilir, dosya izni/sahipligi bozulmaz.
+#  v14.2:
+#  - Kalici kullanici listesi: lists/hosts-user.txt (/data/local/tmp altinda).
+#    Her acilista / refresh'te user-hosts (modul) + hosts-user birlestirilir.
+#    DPI Panel uygulamasi "Her zaman bypass" listesini buraya yazar.
 #  - Yeni komutlar: "service.sh refresh" (listeleri yenile, nfqws2 otomatik
 #    yeniden okur), "service.sh list" (ogrenilen siteleri goster).
 # ============================================================
@@ -275,9 +279,17 @@ setup_lists()
     chmod 777 "$LISTS" "$MODLISTS" 2>/dev/null
 
     # sabit liste her acilista modulden yenilenir (duzenlemeler gecerli olsun)
-    if [ -f "$MODLISTS/user-hosts.txt" ]; then
-        cp -f "$MODLISTS/user-hosts.txt" "$UH" 2>/dev/null
-    fi
+    # UH = modul listesi + kullanicinin kalici listesi (hosts-user.txt).
+    # hosts-user.txt /data/local/tmp altinda: modul guncellense de silinmez,
+    # DPI Panel uygulamasi buraya yazar.
+    HU="$LISTS/hosts-user.txt"
+    [ -f "$HU" ] || : > "$HU"
+    chmod 666 "$HU" 2>/dev/null
+    {
+        [ -f "$MODLISTS/user-hosts.txt" ] && cat "$MODLISTS/user-hosts.txt"
+        echo
+        cat "$HU" 2>/dev/null
+    } > "$UH" 2>/dev/null
     [ -f "$UH" ] || : > "$UH"
 
     # autohostlist KALICI: varsa dokunulmaz, yoksa modul kopyasindan/bos olusur
