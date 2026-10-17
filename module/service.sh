@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ============================================================
-#  discord_dpi - Magisk service.sh (v12)
+#  discord_dpi - Magisk service.sh (v13)
 #  Motor  : zapret2 / nfqws2 (Android ARM64)
 #  Strateji: --payload=tls_client_hello
 #            --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
@@ -29,6 +29,15 @@
 #  - nfqws2 --uid=1:3003 ile /data/adb'ye yazamaz: canli listeler
 #    /data/local/tmp/discord_dpi_lists altinda (777/666), autohostlist
 #    periyodik olarak $MODDIR/lists/autohostlist.txt'e yedeklenir.
+#
+#  v13 (YANLIS POZITIF DUZELTMESI):
+#  - Teshis: gelen UDP paketleri kuyruga alinmadigi icin nfqws2 QUIC
+#    (UDP 443) akislarini "cevapsiz = engelli" sanip google.com,
+#    claude.ai, icloud, app-measurement gibi sitelari autohostlist'e
+#    ekliyordu.
+#  - Cozum: QUIC profilinde --hostlist-auto YOK. QUIC profili listeleri
+#    sadece OKUR (user-hosts + autohostlist), listeye ekleme yapamaz.
+#    Otomatik tespiti yalnizca TCP profili yapar.
 # ============================================================
 
 PATH=/system/bin:/system/xbin:$PATH
@@ -305,9 +314,11 @@ build_nfqws2_args()
     _a="$_a --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1"
 
     if [ "$_lvl" -lt 2 ]; then
-        # Profil 2: QUIC (UDP 443) - ayni listeler
+        # Profil 2: QUIC (UDP 443) - listeleri SADECE okur (hostlist-auto YOK:
+        # gelen UDP kuyruga alinmadigi icin yanlis pozitif uretiyordu)
         if [ $_haveq -eq 1 ]; then
-            _a="$_a --new --filter-udp=443 --filter-l7=quic $_hl"
+            _a="$_a --new --filter-udp=443 --filter-l7=quic"
+            _a="$_a --hostlist=$UH --hostlist=$AH"
             _a="$_a --payload=quic_initial"
             _a="$_a --lua-desync=fake:blob=quic_initial:repeats=6"
         fi
