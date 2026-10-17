@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ============================================================
-#  discord_dpi - Magisk service.sh (v13)
+#  discord_dpi - Magisk service.sh (v14)
 #  Motor  : zapret2 / nfqws2 (Android ARM64)
 #  Strateji: --payload=tls_client_hello
 #            --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
@@ -31,13 +31,29 @@
 #    periyodik olarak $MODDIR/lists/autohostlist.txt'e yedeklenir.
 #
 #  v13 (YANLIS POZITIF DUZELTMESI):
-#  - Teshis: gelen UDP paketleri kuyruga alinmadigi icin nfqws2 QUIC
-#    (UDP 443) akislarini "cevapsiz = engelli" sanip google.com,
-#    claude.ai, icloud, app-measurement gibi sitelari autohostlist'e
-#    ekliyordu.
-#  - Cozum: QUIC profilinde --hostlist-auto YOK. QUIC profili listeleri
-#    sadece OKUR (user-hosts + autohostlist), listeye ekleme yapamaz.
-#    Otomatik tespiti yalnizca TCP profili yapar.
+#  - QUIC profilinde --hostlist-auto YOK: gelen UDP kuyruga alinmadigi
+#    icin QUIC akislari "cevapsiz = engelli" sanilip listeye ekleniyordu.
+#    QUIC profili listeleri sadece OKUR; otomatik tespit yalnizca TCP.
+#
+#  v14 (EXCLUDE LISTESI):
+#  - Teshis: TCP otomatik tespiti de google, googleapis, claude.ai,
+#    github, reklam/telemetri alan adlarini yanlislikla autohostlist'e
+#    ekliyordu (normal sunucu RST/kapanislari engel sanildi).
+#  - Cozum: --hostlist-exclude. Yerlesik exclude listesi hem TCP hem
+#    QUIC profilinde aktif; bu alan adlari asla desync almaz ve
+#    autohostlist'e eklenmez. Acilista autohostlist'teki eski yanlis
+#    kayitlar da temizlenir. Ek alan adi icin lists/exclude-hosts.txt
+#    olusturulabilir (opsiyonel).
+#  v14.1:
+#  - Yerlesik exclude listesi genisletildi (Google/Apple/Microsoft,
+#    GitHub, sosyal medya, reklam/telemetri, oyun, TR banka/devlet...).
+#    Turkiye'de engelli/kisitli servisler (X, Instagram, Discord, Telegram,
+#    Wikipedia...) BILEREK disarida: exclude edilirse bypass almazlar.
+#  - Kalici kullanici listesi: lists/exclude-user.txt (/data/local/tmp altinda,
+#    yeniden baslatmada silinmez). Sonra: sh service.sh refresh
+#  - autohostlist temizligi tek geciste yapilir, dosya izni/sahipligi bozulmaz.
+#  - Yeni komutlar: "service.sh refresh" (listeleri yenile, nfqws2 otomatik
+#    yeniden okur), "service.sh list" (ogrenilen siteleri goster).
 # ============================================================
 
 PATH=/system/bin:/system/xbin:$PATH
@@ -59,6 +75,8 @@ LISTS=/data/local/tmp/discord_dpi_lists
 UH="$LISTS/user-hosts.txt"
 AH="$LISTS/autohostlist.txt"
 DBG="$LISTS/autohostlist.debug.log"
+EH="$LISTS/exclude-hosts.txt"
+EU="$LISTS/exclude-user.txt"
 
 QNUM=200
 DNS_PORT=5335
@@ -275,6 +293,418 @@ setup_lists()
 
     chmod 644 "$UH" 2>/dev/null
     chmod 666 "$AH" "$DBG" "$MODLISTS/autohostlist.txt" 2>/dev/null
+
+    # exclude listesi: yerlesik + modul dosyasi + kalici kullanici dosyasi
+    # (gecici dosyada hazirlanip tek hamlede yerine konur)
+    [ -f "$EU" ] || : > "$EU"
+    chmod 666 "$EU" 2>/dev/null
+    _tmp="$LISTS/.exclude.new"
+    cat > "$_tmp" <<'EXEOF'
+# ---- Google / Android / YouTube ----
+google.com
+google.com.tr
+googleapis.com
+gstatic.com
+googleusercontent.com
+googlevideo.com
+ggpht.com
+gvt1.com
+gvt2.com
+gvt3.com
+1e100.net
+googlesyndication.com
+googleadservices.com
+googletagmanager.com
+googletagservices.com
+google-analytics.com
+doubleclick.net
+admob.com
+app-measurement.com
+crashlytics.com
+android.com
+gmail.com
+goo.gl
+g.co
+youtube.com
+youtu.be
+ytimg.com
+youtube-nocookie.com
+youtubekids.com
+recaptcha.net
+googlezip.net
+gcr.io
+ampproject.org
+waze.com
+fitbit.com
+chromium.org
+withgoogle.com
+# ---- Apple ----
+apple.com
+apple.com.tr
+icloud.com
+icloud-content.com
+mzstatic.com
+cdn-apple.com
+aaplimg.com
+apple-dns.net
+apple.news
+apple-cloudkit.com
+itunes.com
+me.com
+mac.com
+apple.co
+# ---- Microsoft ----
+microsoft.com
+microsoftonline.com
+microsoftstore.com
+live.com
+office.com
+office.net
+office365.com
+outlook.com
+hotmail.com
+sharepoint.com
+onedrive.com
+skype.com
+windows.com
+windowsupdate.com
+msftconnecttest.com
+msedge.net
+msauth.net
+msftauth.net
+msecnd.net
+azure.com
+bing.com
+msn.com
+xbox.com
+xboxlive.com
+visualstudio.com
+vsassets.io
+vscode-cdn.net
+clarity.ms
+# ---- GitHub / gelistirici altyapisi ----
+github.com
+githubassets.com
+githubusercontent.com
+githubapp.com
+githubcopilot.com
+ghcr.io
+github.dev
+github.blog
+npmjs.com
+npmjs.org
+nodejs.org
+python.org
+pypi.org
+pythonhosted.org
+rust-lang.org
+crates.io
+golang.org
+go.dev
+docker.com
+docker.io
+gitlab.com
+bitbucket.org
+stackoverflow.com
+stackexchange.com
+sstatic.net
+jetbrains.com
+gradle.org
+maven.org
+flutter.dev
+dart.dev
+cocoapods.org
+brew.sh
+termux.dev
+termux.com
+mozilla.org
+mozilla.net
+mozilla.com
+firefox.com
+jsdelivr.net
+jsdelivr.com
+unpkg.com
+# ---- Cloudflare ----
+cloudflare.com
+cloudflare-dns.com
+cloudflareinsights.com
+# ---- Yapay zeka ----
+openai.com
+chatgpt.com
+oaistatic.com
+oaiusercontent.com
+anthropic.com
+claude.ai
+claude.com
+perplexity.ai
+huggingface.co
+# ---- Cihaz ureticileri (Xiaomi / Samsung) ----
+xiaomi.com
+mi.com
+miui.com
+xiaomi.net
+mi-img.com
+samsung.com
+samsungapps.com
+samsungcloud.com
+samsungdm.com
+samsungknox.com
+samsungosp.com
+samsungconsent.com
+smartthings.com
+galaxyappstore.com
+# ---- Sosyal medya / yayin / is araclari (Turkiye'de rutin engeli olmayanlar) ----
+facebook.com
+facebook.net
+fb.com
+fbcdn.net
+fbsbx.com
+fb.me
+fb.watch
+messenger.com
+meta.com
+facebookmail.com
+whatsapp.com
+whatsapp.net
+wa.me
+tiktok.com
+tiktokv.com
+tiktokcdn.com
+tiktokcdn-us.com
+tiktokcdn-eu.com
+ttwstatic.com
+byteoversea.com
+ibytedtos.com
+ibyteimg.com
+musical.ly
+muscdn.com
+bytedapm.com
+bytedance.com
+snapchat.com
+snap.com
+sc-cdn.net
+snapkit.co
+pinterest.com
+pinimg.com
+pin.it
+linkedin.com
+licdn.com
+lnkd.in
+twitch.tv
+ttvnw.net
+jtvnw.net
+twitchcdn.net
+twitchsvc.net
+spotify.com
+scdn.co
+spotifycdn.com
+spoti.fi
+netflix.com
+nflxvideo.net
+nflximg.net
+nflximg.com
+nflxso.net
+nflxext.com
+fast.com
+disneyplus.com
+disney-plus.net
+dssott.com
+bamgrid.com
+primevideo.com
+amazon.com
+amazon.com.tr
+media-amazon.com
+ssl-images-amazon.com
+audible.com
+imdb.com
+zoom.us
+zoom.com
+slack.com
+slack-edge.com
+dropbox.com
+dropboxstatic.com
+dropboxapi.com
+notion.so
+figma.com
+canva.com
+adobe.com
+adobe.io
+adobelogin.com
+typekit.net
+paypal.com
+paypalobjects.com
+stripe.com
+# ---- Reklam / analitik / telemetri ----
+liftoff-creatives.io
+tiqcdn.com
+amazon-adsystem.com
+applovin.com
+applvn.com
+unity3d.com
+ironsrc.com
+supersonicads.com
+mopub.com
+vungle.com
+adcolony.com
+inmobi.com
+chartboost.com
+fyber.com
+adjust.com
+adjust.io
+appsflyer.com
+appsflyersdk.com
+branch.io
+singular.net
+amplitude.com
+mixpanel.com
+segment.io
+segment.com
+sentry.io
+bugsnag.com
+newrelic.com
+nr-data.net
+datadoghq.com
+onesignal.com
+braze.com
+criteo.com
+criteo.net
+taboola.com
+outbrain.com
+adnxs.com
+rubiconproject.com
+pubmatic.com
+openx.net
+casalemedia.com
+adsrvr.org
+scorecardresearch.com
+quantserve.com
+hotjar.com
+hotjar.io
+demdex.net
+omtrdc.net
+everesttech.net
+moatads.com
+doubleverify.com
+smartadserver.com
+adform.net
+bidswitch.net
+3lift.com
+tapad.com
+smaato.net
+crwdcntrl.net
+krxd.net
+bluekai.com
+# ---- Oyun / konsol ----
+steampowered.com
+steamcommunity.com
+steamcontent.com
+steamstatic.com
+steamserver.net
+steamusercontent.com
+steam-chat.com
+steamgames.com
+valvesoftware.com
+valve.net
+epicgames.com
+unrealengine.com
+playstation.com
+playstation.net
+sonyentertainmentnetwork.com
+nintendo.com
+nintendo.net
+ea.com
+battle.net
+blizzard.com
+ubisoft.com
+ubi.com
+riotgames.com
+rockstargames.com
+supercell.com
+supercellid.com
+mojang.com
+minecraft.net
+# ---- Turkiye: devlet / operator / banka / alisveris ----
+gov.tr
+edu.tr
+turkcell.com.tr
+vodafone.com.tr
+turktelekom.com.tr
+superonline.net
+isbank.com.tr
+garantibbva.com.tr
+ziraatbank.com.tr
+akbank.com
+yapikredi.com.tr
+halkbank.com.tr
+vakifbank.com.tr
+qnbfinansbank.com
+denizbank.com
+enpara.com
+papara.com
+ing.com.tr
+teb.com.tr
+kuveytturk.com.tr
+trendyol.com
+hepsiburada.com
+n11.com
+sahibinden.com
+yemeksepeti.com
+getir.com
+migros.com.tr
+a101.com.tr
+sok.com.tr
+carrefoursa.com
+mediamarkt.com.tr
+teknosa.com
+vatanbilgisayar.com
+monsternotebook.com.tr
+turkishairlines.com
+thy.com
+flypgs.com
+# ---- BILEREK DISARIDA (Turkiye'de engellenen/kisitlanan servisler) ----
+# Bunlari dislarsan bypass onlara hic uygulanmaz. Yanlis pozitif cok olursa
+# ilgili satirdaki # isaretini kaldir (sonra: service.sh refresh).
+# instagram.com
+# cdninstagram.com
+# threads.net
+# twitter.com
+# x.com
+# twimg.com
+# t.co
+# telegram.org
+# t.me
+# reddit.com
+# redd.it
+# redditmedia.com
+# redditstatic.com
+# wikipedia.org
+# wikimedia.org
+# blogspot.com
+# signal.org
+# bsky.app
+EXEOF
+    [ -f "$MODLISTS/exclude-hosts.txt" ] && cat "$MODLISTS/exclude-hosts.txt" >> "$_tmp" 2>/dev/null
+    cat "$EU" >> "$_tmp" 2>/dev/null
+    # CRLF / bosluk temizligi
+    tr -d '\r' < "$_tmp" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$EH" 2>/dev/null
+    rm -f "$_tmp"
+    chmod 644 "$EH" 2>/dev/null
+
+    # autohostlist'teki yanlis pozitifleri TEK geciste temizle.
+    # sed -i / mv KULLANMA: dosya sahibi/izni degisirse nfqws2 (uid 1) yazamaz.
+    _pat="$LISTS/.exclude.pat"
+    _out="$LISTS/.auto.clean"
+    grep -v -e '^#' -e '^$' "$EH" 2>/dev/null \
+        | sed -e 's/\./\\./g' -e 's/.*/(^|\\.)&$/' > "$_pat"
+    if [ -s "$_pat" ] && [ -s "$AH" ]; then
+        grep -v -E -f "$_pat" "$AH" > "$_out" 2>/dev/null
+        # rc 0/1 = tamam (1: hepsi silindi); 2 = hata -> dokunma
+        if [ $? -le 1 ]; then
+            cat "$_out" > "$AH" 2>/dev/null
+        fi
+    fi
+    rm -f "$_pat" "$_out"
+    chmod 666 "$AH" "$MODLISTS/autohostlist.txt" 2>/dev/null
 }
 
 sync_autolist()
@@ -286,6 +716,10 @@ sync_autolist()
 }
 
 # ---------- nfqws2 (zapret2) ----------
+# Otomatik tespit ayari: yanlis pozitif cok olursa AUTO_FAILS'i 4-5 yap
+AUTO_FAILS=3
+AUTO_TIME=60
+AUTO_RETRANS=3
 # $1 = seviye: 0 tam | 1 fail-threshold/time parametresiz | 2 sadece TCP
 build_nfqws2_args()
 {
@@ -302,10 +736,10 @@ build_nfqws2_args()
         _a="$_a --blob=quic_initial:@$LUATMP/quic_initial.bin"
     fi
 
-    _hl="--hostlist=$UH --hostlist-auto=$AH"
-    _auto="--hostlist-auto-retrans-threshold=3 --hostlist-auto-debug=$DBG"
+    _hl="--hostlist=$UH --hostlist-auto=$AH --hostlist-exclude=$EH"
+    _auto="--hostlist-auto-retrans-threshold=$AUTO_RETRANS --hostlist-auto-debug=$DBG"
     if [ "$_lvl" -eq 0 ]; then
-        _auto="$_auto --hostlist-auto-fail-threshold=3 --hostlist-auto-fail-time=60"
+        _auto="$_auto --hostlist-auto-fail-threshold=$AUTO_FAILS --hostlist-auto-fail-time=$AUTO_TIME"
     fi
 
     # Profil 1: TCP 80/443 - sadece listedeki / otomatik tespit edilen siteler
@@ -318,7 +752,7 @@ build_nfqws2_args()
         # gelen UDP kuyruga alinmadigi icin yanlis pozitif uretiyordu)
         if [ $_haveq -eq 1 ]; then
             _a="$_a --new --filter-udp=443 --filter-l7=quic"
-            _a="$_a --hostlist=$UH --hostlist=$AH"
+            _a="$_a --hostlist=$UH --hostlist=$AH --hostlist-exclude=$EH"
             _a="$_a --payload=quic_initial"
             _a="$_a --lua-desync=fake:blob=quic_initial:repeats=6"
         fi
@@ -366,7 +800,7 @@ start_nfqws2()
         sleep 2
         _pid="$(cat "$RUNDIR/nfqws2.pid" 2>/dev/null)"
         if pid_alive "$_pid" "nfqws2"; then
-            log "nfqws2 calisiyor (qnum $QNUM, hostlist+autohostlist, seviye $_lvl, uid=1:3003, pid $_pid)"
+            log "nfqws2 calisiyor (qnum $QNUM, hostlist+autohostlist+exclude, seviye $_lvl, uid=1:3003, pid $_pid)"
             return 0
         fi
         log "UYARI: nfqws2 seviye $_lvl baslamadi: $(tail -n 3 "$LOGDIR/nfqws2.log" 2>/dev/null | tr '\n' '|' | cut -c1-300)"
@@ -710,6 +1144,15 @@ watchdog()
 }
 
 case "$1" in
+    refresh)
+        # listeleri yeniden olustur (nfqws2 dosya degisimini kendi izler)
+        setup_lists
+        sync_autolist
+        echo "exclude: $(grep -c -v -e '^#' -e '^$' "$EH") alan adi | ogrenilen: $(grep -c -v -e '^#' -e '^$' "$AH")"
+        ;;
+    list)
+        cat "$AH"
+        ;;
     bg)
         main
         watchdog
