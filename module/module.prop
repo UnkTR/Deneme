@@ -1,6 +1,6 @@
 id=discord_dpi
 name=Discord DPI Bypass (zapret2 nfqws2 + DoH)
-version=4.0
-versionCode=4
+version=5.0
+versionCode=5
 author=local
-description=zapret2/nfqws2 tcpseg stratejisi (TR'de test edildi) + yerel DoH DNS. Discord web/app destegi. nfqttl ile tam uyumlu, ona dokunmaz. VPN/uzak sunucu kullanmaz.
+description=zapret2/nfqws2 tcpseg + hostlist/autohostlist (sadece engelli sitelere desync) + yerel DoH DNS. Discord web/ses destegi. nfqttl ile tam uyumlu, ona dokunmaz. VPN/uzak sunucu kullanmaz.
