@@ -1,0 +1,60 @@
+name: build-panel-apk
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'panel.zip'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Projeyi ac (panel.zip) ve imza anahtarini hazirla
+        run: |
+          test -f panel.zip
+          mkdir work
+          unzip -q panel.zip -d work
+          base64 -d work/signing/app.keystore.b64 > work/signing/app.keystore
+
+      - name: APK derle
+        working-directory: work
+        run: gradle --no-daemon --stacktrace assembleRelease
+
+      - name: APK'yi hazirla
+        run: |
+          mkdir -p out
+          cp work/app/build/outputs/apk/release/app-release.apk out/DPI-Panel.apk
+          ls -l out
+
+      - name: Artifact yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: DPI-Panel-apk
+          path: out/DPI-Panel.apk
+
+      - name: Release olarak ekle (telefondan dogrudan indirilebilir)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "panel-${{ github.run_number }}" out/DPI-Panel.apk \
+            --title "DPI Panel #${{ github.run_number }}" \
+            --notes "Telefonda DPI-Panel.apk dosyasini indirip kur."
