@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# discord_dpi uninstall - v6 (eski surum kalintilarini da temizler)
+# discord_dpi uninstall - v7 (eski surum kalintilarini da temizler; DPI_TR_IN + hostlist temizligi)
 
 PATH=/system/bin:/system/xbin:$PATH
 
@@ -7,6 +7,8 @@ MODDIR=${0%/*}
 RUNDIR="$MODDIR/run"
 DNS_PORT=5335
 MARK="0x40000000/0x40000000"
+LISTS=/data/local/tmp/discord_dpi_lists
+LUATMP=/data/local/tmp/discord_dpi_lua
 WAN_IFACES="rmnet_data+ rmnet+ ccmni+"
 
 mkdir -p "$RUNDIR"
@@ -80,6 +82,10 @@ ip6tables -t mangle -F DPI_TR6_UDP 2>/dev/null
 ip6tables -t mangle -X DPI_TR6_TCP 2>/dev/null
 ip6tables -t mangle -X DPI_TR6_UDP 2>/dev/null
 
+while iptables -t mangle -D PREROUTING -j DPI_TR_IN 2>/dev/null; do :; done
+iptables -t mangle -F DPI_TR_IN 2>/dev/null
+iptables -t mangle -X DPI_TR_IN 2>/dev/null
+
 while iptables -t mangle -D POSTROUTING -m mark --mark $MARK -j CONNMARK --or-mark 0x40000000 2>/dev/null; do :; done
 while iptables -D INPUT -p icmp --icmp-type time-exceeded -m connmark --mark $MARK -j DROP 2>/dev/null; do :; done
 while iptables -D FORWARD -p icmp --icmp-type time-exceeded -m connmark --mark $MARK -j DROP 2>/dev/null; do :; done
@@ -92,4 +98,5 @@ for IF in $WAN_IFACES; do
 done
 
 rm -f "$RUNDIR/stop" "$RUNDIR/service.pid"
+rm -rf "$LISTS" "$LUATMP" 2>/dev/null
 exit 0
